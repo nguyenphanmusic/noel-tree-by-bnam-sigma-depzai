@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ASCII 3D Christmas Tree</title>
+    <style>
+        /* Giao diện tối chuẩn Terminal như trong video */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #08090c;
+            color: #d4d4d4;
+            font-family: 'Consolas', 'Courier New', 'Menlo', monospace;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #canvas-container {
+            flex: 1;
+            width: 100%;
+            position: relative;
+            cursor: grab;
+        }
+        #canvas-container:active {
+            cursor: grabbing;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        /* Thanh thông số HUD bên dưới giống hệt video */
+        #hud {
+            padding: 8px 16px 14px 16px;
+            font-size: clamp(11px, 2.5vw, 14px);
+            line-height: 1.45;
+            background: linear-gradient(to top, #08090c 80%, transparent);
+            z-index: 10;
+        }
+        .hud-muted {
+            color: #7a7f8a;
+        }
+        .hud-bright {
+            color: #cfd4dc;
+        }
+        .hud-row-split {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 2px;
+        }
+        .hud-stat {
+            display: inline-block;
+            min-width: 155px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Vùng vẽ cây thông 3D ASCII -->
+    <div id="canvas-container">
+        <canvas id="asciiCanvas"></canvas>
+    </div>
+
+    <!-- Thanh trạng thái HUD mô phỏng giao diện terminal trong video -->
+    <div id="hud">
+        <div class="hud-muted">@999.2006.01.19 · 2026</div>
+        <div class="hud-bright">
+            <span class="hud-stat" id="hud-rot">rotation 000.00°</span>
+            <span id="hud-lights">lights   0</span>
+        </div>
+        <div class="hud-bright" id="hud-letters">letters 0</div>
+        <div class="hud-row-split hud-muted">
+            <span>web agac.html (kéo để xoay)</span>
+            <span id="hud-fps">running · 30 fps</span>
+        </div>
+    </div>
+
+    <script>
+        // Hằng số toán học và kích thước không gian
+        const TAU = Math.PI * 2;
+        const Y0 = -0.43;
+        const Y1 = 2.55;
+
+        // Các loại thành phần vật thể
+        const NEEDLE = 0, TRUNK = 1, BALL = 2, LIGHT = 3, GARLAND = 4, GIFT = 5, RIBBON = 6, SNOWCAP = 7, GROUND = 8;
+
+        // Bảng ký tự ASCII từ tối đến sáng
+        const ASCII_CHARS = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+
+        // Hàm sinh số ngẫu nhiên phân phối chuẩn (Gaussian)
+        function randn() {
+            let u = 0, v = 0;
+            while (u === 0) u = Math.random();
+            while (v === 0) v = Math.random();
+            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(TAU * v);
+        }
+
+        // Chuẩn hóa vector 3D
+        function normalize(x, y, z) {
+            const len = Math.hypot(x, y, z) || 1e-8;
+            return [x / len, y / len, z / len];
+        }
+
+        // Phân bố điểm đều trên mặt cầu theo dãy Fibonacci
+        function fib(n) {
+            const pts = [];
+            const golden = Math.PI * (3 - Math.sqrt(5));
+            for (let i = 0; i < n; i++) {
+                const idx = i + 0.5;
+                const y = 1 - (2 * idx) / n;
+                const r = Math.sqrt(Math.max(0, 1 - y * y));
+                const th = golden * idx;
+                pts.push([r * Math.cos(th), y, r * Math.sin(th)]);
+            }
+            return pts;
+        }
+
+        // Bán kính tán cây theo chiều cao y
+        function envelope(y) {
+            const f = Math.min(1, Math.max(0, (y - Y0) / (Y1 - Y0)));
+            return 0.03 + 0.84 * Math.pow(1 - f, 1.08);
+        }
+
+        // Xây dựng toàn bộ mô hình điểm 3D của cây thông
+        function buildTree() {
+            const points = [];
+            const tips = [];
+            let totalLightPoints = 0;
+
+            function addPoint(x, y, z, nx, ny, nz, r, g, b, kind, t0 = 0, ph = 0, shine = 0) {
+                const [unx, uny, unz] = normalize(nx, ny, nz);
+                points.push({ x, y, z, nx: unx, ny: uny, nz: unz, r, g, b, kind, t0, ph, shine });
+            }
+
+            // 1. LÁ THÔNG & TUYẾT PHỦ TRÊN CÀNH
+            const tierCount = 24;
+            for (let i = 0; i < tierCount; i++) {
+                const y = Y0 + 0.02 + ((Y1 - 0.04 - (Y0 + 0.02)) * i) / (tierCount - 1);
+                const R = envelope(y);
+                const nb = Math.floor(7 + 11 * (1 - (y - Y0) / (Y1 - Y0)));
+
+                for (let b = 0; b < nb; b++) {
+                    const a = (TAU * b) / nb + i * 0.618 + randn() * 0.08;
+                    const L = R * (0.82 + Math.random() * 0.24);
+                    const n = Math.floor(180 + 950 * L); // Tối ưu số điểm để chạy mượt 30-60fps trên mọi trình duyệt
+
+                    const dx = Math.cos(a), dz = Math.sin(a);
+                    const sx = -Math.sin(a), sz = Math.cos(a);
+
+                    for (let k = 0; k < n; k++) {
+                        const s = Math.pow(Math.random(), 0.65);
+                        const spread = (0.035 + 0.11 * s) * randn();
+                        const yy = y + 0.07 * s * L - 0.22 * Math.pow(s * L, 2) + 0.03 * randn();
+                        const px = dx * (s * L) + sx * spread;
+                        const pz = dz * (s * L) + sz * spread;
+
+                        const nrmX = dx * 0.75 + randn() * 0.25;
+                        const nrmY = 0.55 + randn() * 0.25;
+                        const nrmZ = dz * 0.75 + randn() * 0.25;
+
+                        const ao = 0.35 + 0.65 * Math.pow(s, 1.3);
+                        const tone = ao * (0.75 + Math.random() * 0.35);
+                        const t0 = 1.3 + (5.0 * (y - Y0)) / (Y1 - Y0) + 0.45 * s;
+
+                        const isSnow = s > 0.45 && Math.random() < 0.055 * s && nrmY > 0.2;
+                        if (isSnow) {
+                            addPoint(px, yy, pz, 0, 1, 0, 0.92, 0.95, 1.0, SNOWCAP, t0, 0, 0.3);
+                        } else {
+                            addPoint(px, yy, pz, nrmX, nrmY, nrmZ, 0.07 * tone, 0.32 * tone, 0.14 * tone, NEEDLE, t0, 0, 0);
+                        }
+                    }
+
+                    tips.push({
+                        x: dx * (L * 0.93),
+                        y: y + 0.07 * L - 0.22 * L * L,
+                        z: dz * (L * 0.93),
+                        yBase: y
+                    });
+                }
+            }
+
+            // 2. THÂN CÂY
+            for (let hi = 0; hi < 45; hi++) {
+                const h = -0.05 + (0.65 * hi) / 44;
+                for (let ai = 0; ai < 32; ai++) {
+                    const a = (TAU * ai) / 32;
+                    const bark = 0.75 + 0.25 * Math.sin(h * 90 + a * 3);
+                    addPoint(
+                        0.085 * Math.cos(a), h, 0.085 * Math.sin(a),
+                        Math.cos(a), 0, Math.sin(a),
+                        0.42 * bark, 0.26 * bark, 0.14 * bark,
+                        TRUNK, 0.4
+                    );
+                }
+            }
+
+            // 3. DÂY KIM TUYẾN VÀNG XOẮN ỐC
+            const garlandSteps = 1800;
+            const turns = 3.6;
+            for (let i = 0; i < garlandSteps; i++) {
+                const u = i / (garlandSteps - 1);
+                const yg = Y0 + 0.15 + (Y1 - Y0 - 0.45) * u;
+                const ag = TAU * turns * u + 0.9;
+                const swag = -0.06 * Math.abs(Math.sin(ag * 2.5));
+                const rg = envelope(yg) + 0.02;
+
+                const bx = rg * Math.cos(ag);
+                const by = yg + swag;
+                const bz = rg * Math.sin(ag);
+
+                for (let k = 0; k < 4; k++) {
+                    const ox = randn() * 0.016;
+                    const oy = randn() * 0.016;
+                    const oz = randn() * 0.016;
+                    addPoint(
+                        bx + ox, by + oy, bz + oz,
+                        Math.cos(ag) + ox * 15, 0.3 + oy * 15, Math.sin(ag) + oz * 15,
+                        0.98, 0.80, 0.25,
+                        GARLAND, 1.5 + 5.0 * u, 0, 0.8
+                    );
+                }
+            }
+
+            // 4. QUẢ CHÂU & ĐÈN LED NHÁY Ở ĐẦU CÀNH
+            const palette = [
+                [0.95, 0.15, 0.15], // Đỏ
+                [0.98, 0.78, 0.15], // Vàng kim
+                [0.15, 0.55, 0.98], // Xanh dương
+                [0.92, 0.25, 0.75]  // Hồng tím
+            ];
+            const ballSphere = fib(28);
+            const lightSphere = fib(10);
+
+            tips.forEach((tp, idx) => {
+                if (idx % 3 === 0) {
+                    const c = palette[idx % palette.length];
+                    for (const sp of ballSphere) {
+                        addPoint(
+                            tp.x + sp[0] * 0.042, tp.y + sp[1] * 0.042, tp.z + sp[2] * 0.042,
+                            sp[0], sp[1], sp[2],
+                            c[0], c[1], c[2],
+                            BALL, 2.0 + tp.yBase, 0, 0.9
+                        );
+                    }
+                } else if (idx % 2 === 1) {
+                    const c = palette[(idx + 1) % palette.length];
+                    const phase = Math.random() * TAU;
+                    totalLightPoints++;
+                    for (const sp of lightSphere) {
+                        addPoint(
+                            tp.x + sp[0] * 0.022, tp.y + sp[1] * 0.022, tp.z + sp[2] * 0.022,
+                            sp[0], sp[1], sp[2],
+                            c[0], c[1], c[2],
+                            LIGHT, 2.2 + tp.yBase, phase, 0
+                        );
+                    }
+                }
+            });
+
+            // 5. NGÔI SAO TRÊN ĐỈNH CÂY
+            for (let i = 0; i < 10; i++) {
+                const ang = (TAU * i) / 10 + Math.PI / 2;
+                const rOuter = i % 2 === 0 ? 0.16 : 0.065;
+                for (let rs = 0.2; rs <= 1.0; rs += 0.14) {
+                    const sx = rOuter * rs * Math.cos(ang);
+                    const sy = Y1 + 0.08 + rOuter * rs * Math.sin(ang);
+                    for (const zOff of [-0.015, 0, 0.015]) {
+                        addPoint(sx, sy, zOff, 0, 0, 1, 1.0, 0.92, 0.3, LIGHT, 6.5, 0, 0);
+                    }
+                }
+            }
+
+            // 6. MẶT ĐẤT PHỦ TUYẾT & HỘP QUÀ QUANH GỐC CÂY
+            for (let gx = -1.25; gx <= 1.25; gx += 0.045) {
+                for (let gz = -1.25; gz <= 1.25; gz += 0.045) {
+                    if (gx * gx + gz * gz <= 1.25 * 1.25) {
+                        addPoint(gx, -0.05, gz, 0, 1, 0, 0.72, 0.80, 0.92, GROUND, 0.2);
+                    }
+                }
+            }
+
+            const gifts = [
+                { c: [-0.32, 0.03, 0.25], s: [0.16, 0.16, 0.16], box: [0.9, 0.15, 0.2], rib: [1.0, 0.85, 0.2] },
+                { c: [0.34, 0.04, 0.18], s: [0.18, 0.18, 0.18], box: [0.15, 0.45, 0.9], rib: [0.95, 0.95, 0.95] },
+                { c: [0.05, 0.02, -0.35], s: [0.15, 0.14, 0.15], box: [0.15, 0.75, 0.35], rib: [0.95, 0.2, 0.2] }
+            ];
+
+            for (const g of gifts) {
+                for (let axis = 0; axis < 3; axis++) {
+                    for (const sign of [-0.5, 0.5]) {
+                        for (let u1 = -0.5; u1 <= 0.5; u1 += 0.11) {
+                            for (let u2 = -0.5; u2 <= 0.5; u2 += 0.11) {
+                                const pts = [0, 0, 0];
+                                const nrm = [0, 0, 0];
+                                const other = [0, 1, 2].filter(a => a !== axis);
+                                pts[axis] = sign;
+                                pts[other[0]] = u1;
+                                pts[other[1]] = u2;
+                                nrm[axis] = Math.sign(sign);
+
+                                const isRibbon = Math.abs(u1) < 0.13 || Math.abs(u2) < 0.13;
+                                const col = isRibbon ? g.rib : g.box;
+                                addPoint(
+                                    pts[0] * g.s[0] + g.c[0],
+                                    pts[1] * g.s[1] + g.c[1],
+                                    pts[2] * g.s[2] + g.c[2],
+                                    nrm[0], nrm[1], nrm[2],
+                                    col[0], col[1], col[2],
+                                    isRibbon ? RIBBON : GIFT, 0.8, 0, isRibbon ? 0.5 : 0
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            return { points, totalLightPoints };
+        }
+
+        // Khởi tạo Canvas và vòng lặp kết xuất
+        const canvas = document.getElementById('asciiCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const container = document.getElementById('canvas-container');
+
+        const hudRot = document.getElementById('hud-rot');
+        const hudLights = document.getElementById('hud-lights');
+        const hudLetters = document.getElementById('hud-letters');
+
+        const { points, totalLightPoints } = buildTree();
+        const lightDir = normalize(0.6, 0.8, 0.7);
+
+        let width = 0, height = 0;
+        let cols = 0, rows = 0;
+        let charW = 8, charH = 14;
+
+        // Cho phép người dùng dùng chuột hoặc cảm ứng để xoay tự do
+        let manualAngleOffset = 0;
+        let isDragging = false;
+        let lastX = 0;
+
+        container.addEventListener('pointerdown', (e) => {
+            isDragging = true;
+            lastX = e.clientX;
+        });
+        window.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - lastX;
+            lastX = e.clientX;
+            manualAngleOffset += dx * 0.008;
+        });
+        window.addEventListener('pointerup', () => {
+            isDragging = false;
+        });
+
+        function resize() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const rect = container.getBoundingClientRect();
+            width = rect.width;
+            height = rect.height;
+
+            canvas.width = Math.floor(width * dpr);
+            canvas.height = Math.floor(height * dpr);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+            // Tự động điều chỉnh kích thước chữ ASCII sao cho sắc nét trên cả điện thoại & PC
+            const fontSize = width < 600 ? 10 : 12;
+            ctx.font = `${fontSize}px 'Consolas', 'Courier New', monospace`;
+            ctx.textBaseline = 'top';
+
+            charW = ctx.measureText('M').width;
+            charH = fontSize * 1.15;
+
+            cols = Math.floor(width / charW);
+            rows = Math.floor(height / charH);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        const startTime = performance.now();
+        let lastFrameTime = 0;
+        const fpsInterval = 1000 / 30; // Khóa 30 FPS giống trong video
+
+        function render(now) {
+            requestAnimationFrame(render);
+
+            const delta = now - lastFrameTime;
+            if (delta < fpsInterval) return;
+            lastFrameTime = now - (delta % fpsInterval);
+
+            const elapsed = (now - startTime) / 1000;
+
+            // Xóa nền đen
+            ctx.fillStyle = '#08090c';
+            ctx.fillRect(0, 0, width, height);
+
+            if (cols <= 0 || rows <= 0) return;
+
+            const totalCells = cols * rows;
+            const zBuf = new Float32Array(totalCells).fill(-Infinity);
+            const charBuf = new Uint8Array(totalCells);
+            const colorBuf = new Uint32Array(totalCells);
+
+            const angle = (isDragging ? 0 : elapsed * 0.85) + manualAngleOffset;
+            const deg = (((angle * 180) / Math.PI) % 360 + 360) % 360;
+            const ca = Math.cos(angle);
+            const sa = Math.sin(angle);
+
+            const camDist = 3.45;
+            const camY = 0.95;
+            const scale = rows * 1.12;
+            const aspect = charH / charW;
+
+            // Chiếu từng điểm 3D lên lưới ký tự ASCII (Z-buffer)
+            for (let i = 0; i < points.length; i++) {
+                const pt = points[i];
+
+                // Hiệu ứng sáng dần từ gốc lên ngọn khi mới mở trang
+                const reveal = Math.min(1, Math.max(0, elapsed * 2.2 - pt.t0 * 0.55));
+                if (reveal < 0.05) continue;
+
+                // Xoay quanh trục Y
+                const x = pt.x * ca - pt.z * sa;
+                const y = pt.y;
+                const z = pt.x * sa + pt.z * ca;
+
+                const dz = camDist - z;
+                if (dz <= 0.2) continue;
+
+                const sx = Math.floor(cols * 0.5 + (x * scale * aspect) / dz);
+                const sy = Math.floor(rows * 0.53 - ((y - camY) * scale) / dz);
+
+                if (sx < 0 || sx >= cols || sy < 0 || sy >= rows) continue;
+
+                const cellIdx = sy * cols + sx;
+                if (z <= zBuf[cellIdx]) continue;
+                zBuf[cellIdx] = z;
+
+                // Xoay vector pháp tuyến để tính ánh sáng
+                const nx = pt.nx * ca - pt.nz * sa;
+                const ny = pt.ny;
+                const nz = pt.nx * sa + pt.nz * ca;
+
+                const ndotl = Math.max(0.15, nx * lightDir[0] + ny * lightDir[1] + nz * lightDir[2]);
+                let lum = ndotl + pt.shine * Math.pow(ndotl, 4) * 0.6;
+
+                if (pt.kind === LIGHT) {
+                    const blink = 0.65 + 0.55 * Math.sin(elapsed * 5.0 + pt.ph);
+                    lum = 1.25 * blink;
+                }
+                lum *= reveal;
+
+                const r = Math.min(255, Math.floor(pt.r * lum * 255));
+                const g = Math.min(255, Math.floor(pt.g * lum * 255));
+                const b = Math.min(255, Math.floor(pt.b * lum * 255));
+
+                const chIdx = Math.min(
+                    ASCII_CHARS.length - 1,
+                    Math.max(1, Math.floor((lum / 1.35) * (ASCII_CHARS.length - 1)))
+                );
+
+                charBuf[cellIdx] = chIdx;
+                colorBuf[cellIdx] = (r << 16) | (g << 8) | b;
+            }
+
+            // Vẽ các ký tự ASCII lên Canvas
+            let activeLetters = 0;
+            let lastColor = -1;
+
+            for (let r = 0; r < rows; r++) {
+                const rowOffset = r * cols;
+                const py = r * charH;
+                for (let c = 0; c < cols; c++) {
+                    const idx = rowOffset + c;
+                    const chIdx = charBuf[idx];
+                    if (chIdx === 0) continue;
+
+                    activeLetters++;
+                    const colInt = colorBuf[idx];
+                    if (colInt !== lastColor) {
+                        const red = (colInt >> 16) & 255;
+                        const green = (colInt >> 8) & 255;
+                        const blue = colInt & 255;
+                        ctx.fillStyle = `rgb(${red},${green},${blue})`;
+                        lastColor = colInt;
+                    }
+                    ctx.fillText(ASCII_CHARS[chIdx], c * charW, py);
+                }
+            }
+
+            // Cập nhật thông số HUD bên dưới
+            const activeLights = elapsed > 3.5
+                ? totalLightPoints
+                : Math.floor(totalLightPoints * Math.min(1, elapsed / 3.5));
+
+            hudRot.textContent = `rotation ${deg.toFixed(2).padStart(6, '0')}°`;
+            hudLights.textContent = `lights   ${activeLights}`;
+            hudLetters.textContent = `letters ${activeLetters.toLocaleString('en-US')}`;
+        }
+
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
