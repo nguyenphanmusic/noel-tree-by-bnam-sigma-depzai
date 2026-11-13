@@ -96,6 +96,7 @@
 
         // Bảng ký tự ASCII từ tối đến sáng
         const ASCII_CHARS = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+        const SNOW_CHARS = [".", "·", "+", "*", "❄"];
 
         // Hàm sinh số ngẫu nhiên phân phối chuẩn (Gaussian)
         function randn() {
@@ -339,6 +340,20 @@
         const { points, totalLightPoints } = buildTree();
         const lightDir = normalize(0.6, 0.8, 0.7);
 
+        // Khởi tạo 650 bông tuyết 3D rơi dày đặc khắp không gian
+        const SNOW_COUNT = 650;
+        const snowflakes = Array.from({ length: SNOW_COUNT }, () => ({
+            x: (Math.random() - 0.5) * 6.5,
+            y: -0.6 + Math.random() * 4.2,
+            z: (Math.random() - 0.5) * 5.0,
+            vy: 0.22 + Math.random() * 0.35,
+            swayAmp: 0.08 + Math.random() * 0.16,
+            swayFreq: 0.8 + Math.random() * 1.4,
+            phase: Math.random() * TAU,
+            charIdx: Math.floor(Math.random() * SNOW_CHARS.length),
+            bright: 0.65 + Math.random() * 0.35
+        }));
+
         let width = 0, height = 0;
         let cols = 0, rows = 0;
         let charW = 8, charH = 14;
@@ -409,6 +424,7 @@
             const totalCells = cols * rows;
             const zBuf = new Float32Array(totalCells).fill(-Infinity);
             const charBuf = new Uint8Array(totalCells);
+            const snowCharBuf = new Uint8Array(totalCells);
             const colorBuf = new Uint32Array(totalCells);
 
             const angle = (isDragging ? 0 : elapsed * 0.85) + manualAngleOffset;
@@ -416,12 +432,12 @@
             const ca = Math.cos(angle);
             const sa = Math.sin(angle);
 
-            const camDist = 3.45;
-            const camY = 0.95;
-            const scale = rows * 1.12;
+            const camDist = 3.95;
+            const camY = 1.08;
+            const scale = rows * 0.96;
             const aspect = charH / charW;
 
-            // Chiếu từng điểm 3D lên lưới ký tự ASCII (Z-buffer)
+            // Chiếu từng điểm 3D của cây thông lên lưới ký tự ASCII (Z-buffer)
             for (let i = 0; i < points.length; i++) {
                 const pt = points[i];
 
@@ -438,7 +454,7 @@
                 if (dz <= 0.2) continue;
 
                 const sx = Math.floor(cols * 0.5 + (x * scale * aspect) / dz);
-                const sy = Math.floor(rows * 0.53 - ((y - camY) * scale) / dz);
+                const sy = Math.floor(rows * 0.54 - ((y - camY) * scale) / dz);
 
                 if (sx < 0 || sx >= cols || sy < 0 || sy >= rows) continue;
 
@@ -470,10 +486,48 @@
                 );
 
                 charBuf[cellIdx] = chIdx;
+                snowCharBuf[cellIdx] = 0;
                 colorBuf[cellIdx] = (r << 16) | (g << 8) | b;
             }
 
-            // Vẽ các ký tự ASCII lên Canvas
+            // Cập nhật và chiếu 650 bông tuyết trắng rơi dày đặc theo chiều sâu 3D
+            const dt = 1 / 30;
+            for (let i = 0; i < SNOW_COUNT; i++) {
+                const sf = snowflakes[i];
+                sf.y -= sf.vy * dt;
+                if (sf.y < -0.55) {
+                    sf.y = 3.45;
+                    sf.x = (Math.random() - 0.5) * 6.5;
+                    sf.z = (Math.random() - 0.5) * 5.0;
+                }
+
+                const wx = sf.x + Math.sin(elapsed * sf.swayFreq + sf.phase) * sf.swayAmp;
+                const wz = sf.z + Math.cos(elapsed * sf.swayFreq * 0.8 + sf.phase) * sf.swayAmp;
+
+                const dz = camDist - wz;
+                if (dz <= 0.35) continue;
+
+                const sx = Math.floor(cols * 0.5 + (wx * scale * aspect) / dz);
+                const sy = Math.floor(rows * 0.54 - ((sf.y - camY) * scale) / dz);
+
+                if (sx < 0 || sx >= cols || sy < 0 || sy >= rows) continue;
+
+                const cellIdx = sy * cols + sx;
+                if (wz <= zBuf[cellIdx]) continue;
+                zBuf[cellIdx] = wz;
+
+                const depthFade = Math.min(1, Math.max(0.45, (wz + 2.5) / 4.2));
+                const intensity = sf.bright * depthFade;
+                const r = Math.min(255, Math.floor(235 * intensity));
+                const g = Math.min(255, Math.floor(245 * intensity));
+                const b = Math.min(255, Math.floor(255 * intensity));
+
+                charBuf[cellIdx] = 0;
+                snowCharBuf[cellIdx] = sf.charIdx + 1;
+                colorBuf[cellIdx] = (r << 16) | (g << 8) | b;
+            }
+
+            // Vẽ các ký tự ASCII & Tuyết lên Canvas (đảm bảo không bao giờ xuất hiện undefined)
             let activeLetters = 0;
             let lastColor = -1;
 
@@ -483,7 +537,11 @@
                 for (let c = 0; c < cols; c++) {
                     const idx = rowOffset + c;
                     const chIdx = charBuf[idx];
-                    if (chIdx === 0) continue;
+                    const sIdx = snowCharBuf[idx];
+                    if (chIdx === 0 && sIdx === 0) continue;
+
+                    const glyph = sIdx > 0 ? SNOW_CHARS[sIdx - 1] : ASCII_CHARS[chIdx];
+                    if (!glyph) continue;
 
                     activeLetters++;
                     const colInt = colorBuf[idx];
@@ -494,7 +552,7 @@
                         ctx.fillStyle = `rgb(${red},${green},${blue})`;
                         lastColor = colInt;
                     }
-                    ctx.fillText(ASCII_CHARS[chIdx], c * charW, py);
+                    ctx.fillText(glyph, c * charW, py);
                 }
             }
 
