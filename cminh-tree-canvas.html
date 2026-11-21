@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#020806">
+<title>cminh.ascii — Canvas Tree</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #020806; }
+  body { font-family: Consolas, "Cascadia Mono", "Courier New", monospace; }
+  #tree { display: block; width: 100vw; height: 100vh; }
+  .controls {
+    position: fixed; z-index: 2; top: max(12px, env(safe-area-inset-top)); right: 14px;
+    display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+    color: #c5d0c8; background: rgba(2, 12, 7, .74); border: 1px solid rgba(118, 160, 130, .22);
+    border-radius: 8px; backdrop-filter: blur(8px); font-size: 11px;
+  }
+  button, label { font: inherit; }
+  button {
+    color: #d8e6dc; background: #10251a; border: 1px solid #31563d; border-radius: 5px;
+    padding: 6px 9px; cursor: pointer;
+  }
+  button:hover { background: #183724; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #d1b45b; outline-offset: 2px; }
+  label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  input { accent-color: #d2b45e; }
+  #status { position: fixed; left: 10px; top: 10px; z-index: 2; color: #8d9a91; font-size: 10px; pointer-events: none; }
+  @media (max-width: 520px) {
+    .controls { top: auto; right: 8px; bottom: max(9px, env(safe-area-inset-bottom)); gap: 5px; padding: 5px; }
+    button { padding: 6px 7px; }
+    #status { top: 8px; left: 8px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="tree" aria-label="Cây thông Noel ASCII 3D đang mọc dần và xoay"></canvas>
+<div id="status">cminh.ascii · HTML5 Canvas</div>
+<div class="controls" aria-label="Điều khiển hoạt ảnh">
+  <button id="pause" type="button">Tạm dừng</button>
+  <button id="restart" type="button">Chạy lại</button>
+  <label><input id="loop" type="checkbox"> Lặp</label>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // build_scene: port trực tiếp từ cminh_tree.py.
+  // PRNG bên dưới tương thích random.Random(seed) của Python để giữ scene ổn định.
+  // ---------------------------------------------------------------------------
+  const TAU = Math.PI * 2;
+  const WHITE=[238,244,250], GOLD=[255,205,72], CREAM=[255,232,133];
+  const RED=[226,36,48], SILVER=[222,230,240], WARM=[255,196,70];
+  const CORE_COL=[5,18,8];
+  const GREENS=[[20,104,52],[34,150,70],[52,190,92],[78,218,118],[18,82,44]];
+  const GREEN_POOL=[...Array(2).fill(GREENS[0]),...Array(4).fill(GREENS[1]),
+                    ...Array(4).fill(GREENS[2]),...Array(2).fill(GREENS[3]),GREENS[4]];
+  const LEAF_CHARS="%&x*^vW#%x&v";
+  const K_LEAF=0, K_CORE=1, K_TRUNK=2, K_TINSEL=3, K_BAUBLE=4, K_LIGHT=5, K_PRESENT=6;
+  const TIERS=7, R0=1.15, TB=.30, CH=2.25, STAR_Y=2.58, STAR_R=.20, STAR_T=8.5;
+  const PITCH=14*Math.PI/180, CP=Math.cos(PITCH), SP=Math.sin(PITCH), ASPECT=2.0;
+  const LDIR=(()=>{const l=[-.45,.60,.66], n=Math.hypot(...l);return l.map(v=>v/n);})();
+
+  class PythonRandom {
+    constructor(seed=7) {
+      this.mt=new Uint32Array(624); this.index=624;
+      let value=BigInt(seed); if(value<0n)value=-value;
+      const key=[];
+      if(value===0n) key.push(0);
+      while(value>0n){key.push(Number(value&0xffffffffn));value >>= 32n;}
+      this.initByArray(key);
+    }
+    initGenrand(seed) {
+      this.mt[0]=seed>>>0;
+      for(this.index=1;this.index<624;this.index++){
+        const p=this.mt[this.index-1]^(this.mt[this.index-1]>>>30);
+        this.mt[this.index]=(Math.imul(1812433253,p)+this.index)>>>0;
+      }
+    }
+    initByArray(key) {
+      this.initGenrand(19650218);
+      let i=1,j=0,k=Math.max(624,key.length);
+      for(;k>0;k--){
+        const p=this.mt[i-1]^(this.mt[i-1]>>>30);
+        this.mt[i]=(this.mt[i]^(Math.imul(p,1664525)))+key[j]+j;
+        this.mt[i]>>>=0; i++; j++;
+        if(i>=624){this.mt[0]=this.mt[623];i=1;}
+        if(j>=key.length)j=0;
+      }
+      for(k=623;k>0;k--){
+        const p=this.mt[i-1]^(this.mt[i-1]>>>30);
+        this.mt[i]=(this.mt[i]^(Math.imul(p,1566083941)))-i;
+        this.mt[i]>>>=0; i++;
+        if(i>=624){this.mt[0]=this.mt[623];i=1;}
+      }
+      this.mt[0]=0x80000000; this.index=624;
+    }
+    uint32() {
+      if(this.index>=624){
+        let y,kk=0;
+        for(;kk<227;kk++){y=(this.mt[kk]&0x80000000)|(this.mt[kk+1]&0x7fffffff);this.mt[kk]=this.mt[kk+397]^(y>>>1)^((y&1)?0x9908b0df:0);}
+        for(;kk<623;kk++){y=(this.mt[kk]&0x80000000)|(this.mt[kk+1]&0x7fffffff);this.mt[kk]=this.mt[kk-227]^(y>>>1)^((y&1)?0x9908b0df:0);}
+        y=(this.mt[623]&0x80000000)|(this.mt[0]&0x7fffffff);
+        this.mt[623]=this.mt[396]^(y>>>1)^((y&1)?0x9908b0df:0); this.index=0;
+      }
+      let y=this.mt[this.index++];
+      y^=y>>>11; y^=(y<<7)&0x9d2c5680; y^=(y<<15)&0xefc60000; y^=y>>>18;
+      return y>>>0;
+    }
+    random(){const a=this.uint32()>>>5,b=this.uint32()>>>6;return (a*67108864+b)/9007199254740992;}
+    getrandbits(k){return this.uint32()>>>(32-k);}
+    randbelow(n){const k=Math.floor(Math.log2(n))+1;let r;do{r=this.getrandbits(k);}while(r>=n);return r;}
+    randint(a,b){return a+this.randbelow(b-a+1);}
+    choice(seq){return seq[this.randbelow(seq.length)];}
+    choices(seq,weights){
+      let total=0;const cumulative=[];
+      for(const w of weights){total+=w;cumulative.push(total);}
+      const x=this.random()*total;let lo=0,hi=cumulative.length;
+      while(lo<hi){const mid=(lo+hi)>>>1;if(x<cumulative[mid])hi=mid;else lo=mid+1;}
+      return seq[Math.min(lo,seq.length-1)];
+    }
+    shuffle(a){for(let i=a.length-1;i>0;i--){const j=this.randbelow(i+1);[a[i],a[j]]=[a[j],a[i]];}}
+  }
+
+  const rad = h => {const u=(h*TIERS)%1;return R0*(1-h)*(.84+.16*(1-u));};
+  function fibSphere(n){
+    const ga=Math.PI*(3-Math.sqrt(5)),out=[];
+    for(let i=0;i<n;i++){const y=1-2*(i+.5)/n,r=Math.sqrt(Math.max(0,1-y*y)),a=ga*i;out.push([Math.cos(a)*r,y,Math.sin(a)*r]);}
+    return out;
+  }
+  function buildScene(density=.5, seed=7){
+    const rng=new PythonRandom(seed), rnd=()=>rng.random(), pts=[], lightT=[];
+    const add=(gt,kind,x,y,z,ch,col,nx,ny,nz,phase)=>pts.push({gt,kind,x,y,z,ch:ch.charCodeAt(0),col,nx,ny,nz,phase});
+    const jit=(col,a)=>col.map(v=>Math.max(0,Math.min(255,v+rng.randint(-a,a))));
+
+    // 1) Thân cây: trụ nâu gỗ, mọc sớm.
+    for(let j=0;j<Math.max(200,Math.trunc(1500*density));j++){
+      const a=rnd()*TAU,y=rnd()*.52,rr=.15*(.84+.16*rnd()),br=rnd();
+      const col=[Math.trunc(92+30*br),Math.trunc(58+20*br),Math.trunc(33+12*br)];
+      const gt=.10+.55*(y/.52)+rnd()*.05;
+      add(gt,K_TRUNK,rr*Math.cos(a),y,rr*Math.sin(a),rng.choice("#%|H"),col,Math.cos(a),0,Math.sin(a),0);
+    }
+    // 2) Tán lá + tuyết trắng ở mép trên mỗi tầng.
+    for(let j=0;j<Math.max(500,Math.trunc(16000*density));j++){
+      const h=1-Math.sqrt(rnd()),a=rnd()*TAU,ca=Math.cos(a),sa=Math.sin(a);
+      const q=1-.45*rnd()**2,rr=rad(h)*q,u=(h*TIERS)%1;
+      let col,ch;
+      if(rnd()<.03+.17*u**1.5){col=jit(WHITE,10);ch=rng.choice("*x%^");}
+      else {col=jit(rng.choice(GREEN_POOL),10);ch=rng.choice(LEAF_CHARS);}
+      const gt=.25+4.6*(h**.9)+rnd()*.3;
+      add(gt,K_LEAF,rr*ca,TB+h*CH,rr*sa,ch,col,ca*.85,.40,sa*.85,q);
+    }
+    // 3) Lõi tối bên trong tán.
+    for(let j=0;j<Math.max(300,Math.trunc(6000*density));j++){
+      const h=1-(1-rnd())**(1/3),a=rnd()*TAU,rr=rad(h)*(.50+.29*rnd());
+      const gt=.20+4.6*(h**.9)+rnd()*.3;
+      add(gt,K_CORE,rr*Math.cos(a),TB+h*CH,rr*Math.sin(a),".",CORE_COL,0,0,0,0);
+    }
+    // 4) Dây kim tuyến xoắn ốc 3.8 vòng, có độ võng.
+    const nt=Math.max(600,Math.trunc(4200*density));
+    for(let j=0;j<nt;j++){
+      const p=(j+rnd())/nt,ang=TAU*3.8*p,f=(ang%Math.PI)/Math.PI,sag=.10*Math.sin(Math.PI*f);
+      const hn=Math.max(.03,.92-.85*p-sag/CH),rr=R0*(1-hn)+.06+(rnd()-.5)*.06;
+      const y=TB+hn*CH+(rnd()-.5)*.07,ca=Math.cos(ang),sa=Math.sin(ang);
+      const col=jit(rng.choice([CREAM,GOLD,[255,244,196]]),8),gt=5+1.8*p+rnd()*.05;
+      add(gt,K_TINSEL,rr*ca,y,rr*sa,rng.choice("@#=~-*+"),col,ca,.25,sa,rnd()*TAU);
+    }
+    // 5) 84 quả châu cầu 3D.
+    const unitB=fibSphere(Math.max(14,Math.trunc(160*density))),centers=[];let tries=0;
+    while(centers.length<84&&tries<8000){
+      tries++;const h=.07+.80*(1-Math.sqrt(rnd())),a=rnd()*TAU,rr=rad(h)*1.02+.04;
+      const c=[rr*Math.cos(a),TB+h*CH,rr*Math.sin(a)];
+      if(centers.every(q=>(c[0]-q[0])**2+(c[1]-q[1])**2+(c[2]-q[2])**2>.04))centers.push(c);
+    }
+    for(const c of centers){
+      const u=rnd(),col=u<.50?RED:(u<.75?GOLD:SILVER),bt=6.2+rnd()*1.8,spin=rnd()*TAU,cs=Math.cos(spin),sn=Math.sin(spin);
+      for(const [ux,uy,uz] of unitB){
+        const nx=ux*cs+uz*sn,nz=-ux*sn+uz*cs;
+        add(bt+.25*(.5+.5*uy),K_BAUBLE,c[0]+.075*nx,c[1]+.075*uy,c[2]+.075*nz,"o",jit(col,6),nx,uy,nz,0);
+      }
+    }
+    // 6) Đèn nháy tại đầu cành, mỗi cụm có pha riêng.
+    const unitL=fibSphere(Math.max(6,Math.trunc(30*density))),weights=Array.from({length:TIERS},(_,j)=>1-(j+.5)/TIERS);
+    for(let j=0;j<200;j++){
+      const k=rng.choices(Array.from({length:TIERS},(_,i)=>i),weights),h=Math.min(.95,(k+rnd()*.18)/TIERS),a=rnd()*TAU;
+      const rr=rad(h)*1.03+.02,cx=rr*Math.cos(a),cy=TB+h*CH,cz=rr*Math.sin(a),u=rnd();
+      const col=u<.35?RED:(u<.75?WARM:[255,250,236]),lt=8+rnd()*2.4;lightT.push(lt);
+      const ph=rnd()*TAU,spin=rnd()*TAU,cs=Math.cos(spin),sn=Math.sin(spin);
+      for(const [ux,uy,uz] of unitL){
+        const nx=ux*cs+uz*sn,nz=-ux*sn+uz*cs;
+        add(lt,K_LIGHT,cx+.042*nx,cy+.042*uy,cz+.042*nz,"o",col,nx,uy,nz,ph);
+      }
+    }
+    // 7) Hộp quà dưới gốc, ruy-băng chữ thập và nơ.
+    const pairs=[[[214,32,42],GOLD],[[28,148,86],RED],[[246,218,128],RED],[[214,32,42],CREAM],
+      [[24,150,150],GOLD],[[232,186,62],[214,32,42]],[[28,148,86],GOLD],[[214,32,42],SILVER]];
+    rng.shuffle(pairs);const boxes=[];tries=0;
+    while(boxes.length<8&&tries<4000){
+      tries++;const ang=rnd()*TAU,rr=1.05+.55*rnd(),bx=rr*Math.cos(ang),bz=rr*Math.sin(ang);
+      if(boxes.every(o=>Math.hypot(bx-o[0],bz-o[1])>.62))boxes.push([bx,bz,.28+.22*rnd(),.20+.22*rnd(),.28+.22*rnd(),rnd()*TAU]);
+    }
+    const unitBow=fibSphere(Math.max(6,Math.trunc(24*density)));
+    for(let bi=0;bi<boxes.length;bi++){
+      const [bx,bz,w,hh,d,yaw]=boxes[bi], [body,ribbon]=pairs[bi%pairs.length],cy=Math.cos(yaw),sy=Math.sin(yaw),t0=9.4+bi*.3,rw=.045;
+      const area=2*(w*hh+d*hh)+w*d,npts=Math.max(80,Math.trunc(area/.0004*density)),fa=[w*hh,w*hh,d*hh,d*hh,w*d];
+      for(let j=0;j<npts;j++){
+        const f=rng.choices([0,1,2,3,4],fa);let x,y,z,nx,ny,nz,rib;
+        if(f===0||f===1){const sg=f===0?1:-1;x=(rnd()-.5)*w;y=rnd()*hh;z=sg*d/2;nx=0;ny=0;nz=sg;rib=Math.abs(x)<rw;}
+        else if(f===2||f===3){const sg=f===2?1:-1;x=sg*w/2;y=rnd()*hh;z=(rnd()-.5)*d;nx=sg;ny=0;nz=0;rib=Math.abs(z)<rw;}
+        else{x=(rnd()-.5)*w;y=hh;z=(rnd()-.5)*d;nx=0;ny=1;nz=0;rib=Math.abs(x)<rw||Math.abs(z)<rw;}
+        const wx=bx+x*cy+z*sy,wz=bz-x*sy+z*cy,nnx=nx*cy+nz*sy,nnz=-nx*sy+nz*cy;
+        const col=jit(rib?ribbon:body,5);
+        add(t0+.45*(y/hh)+rnd()*.03,K_PRESENT,wx,y,wz," ",col,nnx,ny,nnz,0);
+      }
+      for(const side of [-1,1]){
+        const lx=side*.055,lz=0,wx=bx+lx*cy+lz*sy,wz=bz-lx*sy+lz*cy;
+        for(const [ux,uy,uz] of unitBow){
+          const nx=ux*cy+uz*sy,nz=-ux*sy+uz*cy;
+          add(t0+.5,K_PRESENT,wx+.05*nx,hh+.045+.05*uy,wz+.05*nz," ",jit(ribbon,5),nx,uy,nz,0);
+        }
+      }
+    }
+    pts.sort((a,b)=>a.gt-b.gt);lightT.sort((a,b)=>a-b);
+    const n=pts.length,sc={n,GT:new Float64Array(n),KIND:new Uint8Array(n),X:new Float64Array(n),Y:new Float64Array(n),Z:new Float64Array(n),
+      CH:new Uint8Array(n),COL:new Uint8Array(n*3),NX:new Float64Array(n),NY:new Float64Array(n),NZ:new Float64Array(n),PH:new Float64Array(n),lightT};
+    for(let i=0;i<n;i++){
+      const p=pts[i];sc.GT[i]=p.gt;sc.KIND[i]=p.kind;sc.X[i]=p.x;sc.Y[i]=p.y;sc.Z[i]=p.z;sc.CH[i]=p.ch;
+      sc.COL[i*3]=p.col[0];sc.COL[i*3+1]=p.col[1];sc.COL[i*3+2]=p.col[2];
+      sc.NX[i]=p.nx;sc.NY[i]=p.ny;sc.NZ[i]=p.nz;sc.PH[i]=p.phase;
+    }
+    return sc;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Renderer: phép chiếu, lưới ký tự, z-buffer, ánh sáng, sao và HUD từ Python;
+  // đầu ra được rasterize lên HTML5 Canvas thay vì ANSI terminal.
+  // ---------------------------------------------------------------------------
+  const canvas=document.getElementById("tree"),ctx=canvas.getContext("2d",{alpha:false,desynchronized:true});
+  const pack=(r,g,b)=>((r&255)<<16)|((g&255)<<8)|(b&255);
+  const rgbCssCache=new Map();
+  function cssColor(v){let s=rgbCssCache.get(v);if(!s){s=`rgb(${(v>>>16)&255},${(v>>>8)&255},${v&255})`;rgbCssCache.set(v,s);}return s;}
+  const upperBound=(a,x)=>{let lo=0,hi=a.length;while(lo<hi){const m=(lo+hi)>>>1;if(a[m]<=x)lo=m+1;else hi=m;}return lo;};
+  function inside(px,py,v){let ins=false,j=v.length-1;for(let i=0;i<v.length;i++){const [xi,yi]=v[i],[xj,yj]=v[j];if((yi>py)!==(yj>py)&&px<(xj-xi)*(py-yi)/(yj-yi)+xi)ins=!ins;j=i;}return ins;}
+
+  class CanvasRenderer {
+    constructor(scene,rot=36){this.sc=scene;this.rot=rot;this.resize(1,1,12);}
+    resize(pixelW,pixelH,fontPx){
+      const dpr=Math.min(window.devicePixelRatio||1,2);
+      canvas.width=Math.max(1,Math.round(pixelW*dpr));canvas.height=Math.max(1,Math.round(pixelH*dpr));
+      canvas.style.width=pixelW+"px";canvas.style.height=pixelH+"px";ctx.setTransform(dpr,0,0,dpr,0,0);
+      this.fontPx=fontPx;ctx.font=`${fontPx}px Consolas, "Cascadia Mono", "Courier New", monospace`;
+      this.charW=ctx.measureText("M").width;this.charH=this.charW*2;
+      const W=Math.max(20,Math.floor(pixelW/this.charW)),H=Math.max(10,Math.floor(pixelH/this.charH));
+      this.W=W;this.H=H;this.N=W*H;
+      const sc=this.sc,syV=(H-2)*.94/(2.81*CP+1.75*SP),syH=.94*W/(3.6*ASPECT),sy=Math.max(1,Math.min(syV,syH));
+      this.sy=sy;this.sx=sy*ASPECT;const kY=sy*CP;this.kD=sy*SP;
+      const used=sy*(2.81*CP+1.75*SP),top=Math.max(.5,(H-1-used)/2);
+      this.ry0=top+2.81*kY;this.cx=(W-1)/2;
+      this.PX=new Float64Array(sc.n);this.PZ=new Float64Array(sc.n);this.PYK=new Float64Array(sc.n);this.PYS=new Float64Array(sc.n);
+      for(let i=0;i<sc.n;i++){this.PX[i]=sc.X[i];this.PZ[i]=sc.Z[i];this.PYK[i]=sc.Y[i]*kY;this.PYS[i]=sc.Y[i]*SP;}
+
+      // Nền mặt đất + sao trời được tạo xác định theo kích thước lưới, như Renderer gốc.
+      this.baseChars=new Uint8Array(this.N);this.baseChars.fill(32);this.baseCols=new Uint32Array(this.N);
+      const rng=new PythonRandom(1234+W*7+H),hz=Math.trunc(H*.53);
+      for(let r=hz;r<H;r++){
+        const q=(r-hz)/Math.max(1,H-1-hz);
+        for(let cc=0;cc<W;cc++){
+          if(rng.random()<.10)continue;
+          if(q<.50){if((cc+r)%2===0){const v=52+Math.trunc(95*q),idx=r*W+cc;this.baseChars[idx]=46;this.baseCols[idx]=pack(v,v+6,v+14);}}
+          else if(cc%4===(r*2)%4){const v=92+Math.trunc(70*(q-.5)),idx=r*W+cc;this.baseChars[idx]=45;this.baseCols[idx]=pack(v,v+6,v+14);}
+        }
+      }
+      const sky=Math.trunc(H*.62),stars=[],seen=new Set();
+      for(let j=0;j<Math.trunc(W*sky*.035);j++){
+        const r=rng.randbelow(sky),cc=rng.randbelow(W);if(r>=H-4&&cc<30)continue;
+        const idx=r*W+cc;if(seen.has(idx))continue;seen.add(idx);
+        const typ=rng.choices([0,1,2],[.30,.30,.40]),ph=rng.random()*TAU,sp=.6+rng.random()*2.2,b0=.55+.45*rng.random();
+        stars.push([idx,typ,ph,sp,b0]);
+      }
+      this.stars=stars;
+
+      // Ngôi sao billboard ở ngọn cây và các tia sáng xung quanh.
+      const scx=this.cx,scy=this.ry0-STAR_Y*kY,Ro=STAR_R*sy*.95,Ri=Ro*.45,verts=[];
+      for(let k=0;k<10;k++){const a=Math.PI/2+k*Math.PI/5,rr=k%2===0?Ro:Ri;verts.push([rr*Math.cos(a),rr*Math.sin(a)]);}
+      const mask=[];
+      for(let r=Math.max(0,Math.trunc(scy-Ro-1));r<Math.min(H,Math.trunc(scy+Ro+2));r++){
+        for(let cc=Math.max(0,Math.trunc(scx-Ro*ASPECT-2));cc<Math.min(W,Math.trunc(scx+Ro*ASPECT+3));cc++){
+          const px=(cc-scx)/ASPECT,py=scy-r;if(inside(px,py,verts))mask.push([r*W+cc,Math.hypot(px,py)/Ro]);
+        }
+      }
+      this.starMask=mask;const rays=[];
+      const put=(r,cc,ch,fr)=>{r=Math.round(r);cc=Math.round(cc);if(r>=0&&r<H&&cc>=0&&cc<W)rays.push([r*W+cc,ch.charCodeAt(0),fr]);};
+      for(let k=1;k<10;k++)put(scy-Ro-.5-k,scx,"|",k/10);
+      for(let k=1;k<7;k++){put(scy-Ro*.55-k*.9,scx-(Ro*.55*ASPECT+k*2.4),"\\",k/7);put(scy-Ro*.55-k*.9,scx+(Ro*.55*ASPECT+k*2.4),"/",k/7);}
+      for(let k=1;k<6;k++){put(scy,scx-(Ro*ASPECT*.95+1+k*2),"-",k/6);put(scy,scx+(Ro*ASPECT*.95+1+k*2),"-",k/6);}
+      this.rays=rays;
+      this.chars=new Uint8Array(this.N);this.cols=new Uint32Array(this.N);
+      this.zb=new Float64Array(this.N);this.ib=new Int32Array(this.N);
+    }
+
+    frame(t,T){
+      const sc=this.sc,W=this.W,H=this.H,N=this.N,sin=Math.sin,th=this.rot*Math.PI/180*T,c=Math.cos(th),s=Math.sin(th);
+      const chars=this.chars,cols=this.cols;chars.set(this.baseChars);cols.set(this.baseCols);
+      // Sao nền nhấp nháy theo pha riêng.
+      for(const [idx,typ,ph,sp,b0] of this.stars){
+        const b=b0*(.55+.45*sin(sp*T+ph)),v=Math.trunc(70+185*b);
+        const ch=typ===0?(b>.42?43:(b>.25?42:46)):(typ===1?(b>.32?42:46):46);
+        chars[idx]=ch;cols[idx]=pack(v,v,Math.min(255,v+14));
+      }
+      let sm=(t-STAR_T)/.6;
+      if(sm>0){sm=Math.min(sm,1);const pulse=.80+.20*sin(2.4*T);for(const [idx,ch,fr] of this.rays){const a=sm*pulse*(1-fr)*.62;chars[idx]=ch;cols[idx]=pack(Math.trunc(255*a),Math.trunc(176*a),Math.trunc(60*a));}}
+
+      // Z-buffer: mỗi ô giữ điểm gần camera nhất.
+      this.zb.fill(-1e9);this.ib.fill(-1);const k=upperBound(sc.GT,t),cx=this.cx,ry0=this.ry0,sx=this.sx,kD=this.kD;
+      for(let i=0;i<k;i++){
+        const x=this.PX[i],z=this.PZ[i],yk=this.PYK[i],ys=this.PYS[i],d=z*c-x*s;
+        const col=Math.trunc(cx+(x*c+z*s)*sx+.5),row=Math.trunc(ry0-yk+d*kD+.5);
+        if(col>=0&&col<W&&row>=0&&row<H){const idx=row*W+col,vd=d*CP+ys;if(vd>this.zb[idx]){this.zb[idx]=vd;this.ib[idx]=i;}}
+      }
+
+      // Tô màu, ánh sáng và lóe trắng lúc điểm mới mọc.
+      const KIND=sc.KIND,CH=sc.CH,COL=sc.COL,GT=sc.GT,NX=sc.NX,NY=sc.NY,NZ=sc.NZ,PH=sc.PH;
+      const [LX,LY,LZ]=LDIR;
+      for(let idx=0;idx<N;idx++){
+        const i=this.ib[idx];if(i<0)continue;
+        const kind=KIND[i];let r=COL[i*3],g=COL[i*3+1],b=COL[i*3+2],ch=CH[i];
+        const nx=NX[i],ny=NY[i],nz=NZ[i];let lam=.5;
+        if(nx||ny||nz)lam=(nx*c+nz*s)*LX+ny*LY+(nz*c-nx*s)*LZ;
+        const lp=lam>0?lam:0;let sh;
+        if(kind===K_CORE){chars[idx]=ch;cols[idx]=pack(r,g,b);continue;}
+        if(kind===K_LEAF)sh=(.50+.62*lp)*(.35+.65*(PH[i]-.55)/.45);
+        else if(kind===K_TRUNK)sh=.50+.62*lp;
+        else if(kind===K_TINSEL){const sp_=.82+.18*sin(7*T+PH[i]);sh=(.88+.30*lp)*sp_;if(sp_>.99){r=r+Math.trunc((255-r)/2);g=g+Math.trunc((255-g)/2);b=b+Math.trunc((255-b)/2);}}
+        else if(kind===K_BAUBLE){sh=.30+.85*lp;ch="o0O%#@".charCodeAt(Math.min(5,Math.trunc(lp*6)));if(lam>.92){r=255;g=255;b=255;ch=64;}}
+        else if(kind===K_LIGHT){const ph=PH[i],w=5+4*((ph*3.7)%1),br=.22+.78*(.5+.5*sin(w*T+ph*5));sh=br;ch=(br>.72?64:(br>.50?79:(br>.34?111:46)));if(br>.92){r=r+Math.trunc((255-r)/3);g=g+Math.trunc((255-g)/3);b=b+Math.trunc((255-b)/3);}}
+        else {sh=.40+.72*lp;ch=".:%#X@".charCodeAt(Math.min(5,Math.trunc(lp*5.2)));}
+        r*=sh;g*=sh;b*=sh;
+        const age=t-GT[i];if(age<.9){const m=1-age/.9;r+=(255-r)*m*.92;g+=(255-g)*m*.92;b+=(255-b)*m*.92;if(m>.55&&kind!==K_LIGHT)ch=35;}
+        chars[idx]=ch;cols[idx]=pack((r>255?255:Math.trunc(r))&0xfc,(g>255?255:Math.trunc(g))&0xfc,(b>255?255:Math.trunc(b))&0xfc);
+      }
+      // Ngôi sao trên đỉnh cây.
+      if(sm>0){const pulse=.85+.15*sin(3.1*T);for(const [idx,f] of this.starMask){const ch=f<.35?64:(f<.72?35:42),a=sm*pulse;chars[idx]=ch;cols[idx]=pack(Math.trunc(255*a),Math.trunc((246-60*f)*a),Math.trunc((190-120*f)*a));}}
+      // HUD gốc: tên, góc xoay, số đèn và số điểm đã được kích hoạt.
+      const nl=upperBound(sc.lightT,t),deg=((th*180/Math.PI)%360+360)%360;
+      const hud=[ ["cminh.ascii",pack(200,208,216)],
+        [`rotation ${deg.toFixed(2).padStart(6,"0")}°   lights ${nl}`,pack(120,130,142)],
+        [`points ${k.toLocaleString("en-US")}`,pack(120,130,142)] ];
+      for(let li=0;li<hud.length;li++){
+        const [str,color]=hud[li],row=H-3+li;if(row<0||row>=H)continue;
+        for(let j=0;j<Math.min(str.length,W-1);j++){const idx=row*W+j;chars[idx]=str.charCodeAt(j);cols[idx]=color;}
+      }
+      this.draw();
+    }
+
+    draw(){
+      const {W,H,N,chars,cols,charW,charH}=this;
+      ctx.fillStyle="#020806";ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight);
+      ctx.font=`${this.fontPx}px Consolas, "Cascadia Mono", "Courier New", monospace`;ctx.textBaseline="top";
+      let last=-1;
+      for(let idx=0;idx<N;idx++){
+        const ch=chars[idx];if(ch===32)continue;
+        const color=cols[idx];if(color!==last){ctx.fillStyle=cssColor(color);last=color;}
+        const row=(idx/W)|0,col=idx-row*W;
+        ctx.fillText(String.fromCharCode(ch),col*charW,row*charH);
+      }
+    }
+  }
+
+  // Mặc định khớp CLI của cminh_tree.py: density=.5, rot=36°/s, seed=7, fps=30.
+  const scene=buildScene(.5,7),renderer=new CanvasRenderer(scene,36);
+  function resize(){
+    const w=window.innerWidth,h=window.innerHeight;
+    const fontPx=w<560?10:(w<900?12:14);
+    renderer.resize(w,h,fontPx);
+  }
+  window.addEventListener("resize",resize,{passive:true});resize();
+
+  const pauseButton=document.getElementById("pause"),restartButton=document.getElementById("restart"),loopCheck=document.getElementById("loop");
+  let startAt=performance.now(),pausedAt=0,pausedDuration=0,isPaused=false,lastDraw=0;
+  function setPaused(value){
+    if(value===isPaused)return;
+    const now=performance.now();
+    if(value)pausedAt=now;else{pausedDuration+=now-pausedAt;pausedAt=0;}
+    isPaused=value;pauseButton.textContent=value?"Tiếp tục":"Tạm dừng";
+  }
+  pauseButton.addEventListener("click",()=>setPaused(!isPaused));
+  restartButton.addEventListener("click",()=>{startAt=performance.now();pausedDuration=0;pausedAt=isPaused?startAt:0;});
+  loopCheck.addEventListener("change",()=>{});
+  window.addEventListener("keydown",e=>{
+    if(e.code==="Space"&&e.target===document.body){e.preventDefault();setPaused(!isPaused);}
+    if(e.key.toLowerCase()==="r")restartButton.click();
+  });
+
+  function animate(now){
+    requestAnimationFrame(animate);
+    if(isPaused)return;
+    // Giới hạn tối đa 60Hz; trình duyệt tự điều tiết theo refresh rate.
+    if(now-lastDraw<1000/60)return;lastDraw=now;
+    const T=(now-startAt-pausedDuration)/1000;
+    const t=loopCheck.checked?(T%26):T;
+    renderer.frame(t,T);
+  }
+  requestAnimationFrame(animate);
+
+  // Giải phóng frame khi tab ẩn để tránh tiêu thụ tài nguyên nền.
+  document.addEventListener("visibilitychange",()=>{if(document.hidden){lastDraw=performance.now();}});
+})();
+</script>
+</body>
+</html>
